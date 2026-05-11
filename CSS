@@ -1,0 +1,23 @@
+body { 
+  overscroll-behavior-y: none; 
+  -webkit-touch-callout: none; 
+  -webkit-user-select: none;   
+  user-select: none;
+  background-color: #F9FBFF;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+.allow-select {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+::-webkit-scrollbar { 
+  width: 0px; 
+  background: transparent; 
+}
+
+/* 隱藏與顯示的輔助 class */
+.hidden-block { 
+  display: none !important; 
+}
