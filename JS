@@ -1,0 +1,359 @@
+// 初始化 Lucide Icons
+lucide.createIcons();
+
+// 全域變數與 API
+const API_KEY = ""; // 請在此處填入你的 Gemini API Key
+const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`;
+const TTS_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${API_KEY}`;
+
+let state = {
+  tone: 'standard',
+  isListening: false,
+  isLoading: false,
+  history: JSON.parse(localStorage.getItem('gemini_history') || '[]'),
+  translations: null
+};
+
+let recognition = null;
+let stream = null;
+let playingAudio = null;
+
+// 初始化語音辨識
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (SpeechRecognition) {
+  recognition = new SpeechRecognition();
+  recognition.continuous = false;
+  recognition.lang = 'zh-TW';
+  recognition.onstart = () => updateListeningUI(true);
+  recognition.onend = () => updateListeningUI(false);
+  recognition.onresult = (e) => {
+    const text = e.results[0][0].transcript;
+    document.getElementById('inputText').value = text;
+    executeTranslation();
+  };
+}
+
+// UI 控制函式
+function switchTab(tab) {
+  document.getElementById('tab-translate').classList.toggle('hidden-block', tab !== 'translate');
+  document.getElementById('tab-history').classList.toggle('hidden-block', tab !== 'history');
+  
+  document.getElementById('nav-translate').className = `flex flex-col items-center gap-1 transition-all ${tab === 'translate' ? 'text-indigo-600 scale-110' : 'text-slate-400'}`;
+  document.getElementById('nav-history').className = `flex flex-col items-center gap-1 transition-all ${tab === 'history' ? 'text-indigo-600 scale-110' : 'text-slate-400'}`;
+  
+  if (tab === 'history') renderHistory();
+}
+
+function setTone(tone) {
+  state.tone = tone;
+  const tones = ['standard', 'formal', 'casual', 'cute'];
+  tones.forEach(t => {
+    const btn = document.getElementById(`tone-${t}`);
+    if (t === tone) {
+      btn.className = "tone-btn px-3 py-1.5 rounded-xl text-xs font-bold transition-all bg-indigo-600 text-white shadow-md shadow-indigo-200";
+    } else {
+      btn.className = "tone-btn px-3 py-1.5 rounded-xl text-xs font-bold transition-all bg-slate-50 text-slate-400 active:scale-95";
+    }
+  });
+}
+
+function clearInput() {
+  document.getElementById('inputText').value = '';
+  document.getElementById('results-container').classList.add('hidden-block');
+  document.getElementById('analysis-box').classList.add('hidden-block');
+  document.getElementById('suggestions-box').classList.add('hidden-block');
+  state.translations = null;
+}
+
+function showError(msg) {
+  const toast = document.getElementById('error-toast');
+  toast.innerText = msg;
+  toast.classList.remove('hidden-block');
+  setTimeout(() => toast.classList.add('hidden-block'), 3000);
+}
+
+function updateLoadingUI(isLoading) {
+  state.isLoading = isLoading;
+  const dot = document.getElementById('status-dot');
+  const text = document.getElementById('status-text');
+  const btn = document.getElementById('btn-translate');
+  
+  if (isLoading) {
+    dot.className = "w-2 h-2 rounded-full bg-indigo-600 animate-ping";
+    text.innerText = "Processing";
+    btn.disabled = true;
+    btn.classList.add('opacity-30');
+  } else {
+    dot.className = "w-2 h-2 rounded-full bg-slate-300";
+    text.innerText = "Ready";
+    btn.disabled = false;
+    btn.classList.remove('opacity-30');
+  }
+}
+
+function updateListeningUI(isListening) {
+  state.isListening = isListening;
+  const input = document.getElementById('inputText');
+  const btn = document.getElementById('btn-mic');
+  
+  if (isListening) {
+    input.classList.add('bg-rose-50/30');
+    input.placeholder = "聆聽中...";
+    btn.className = "w-11 h-11 rounded-2xl flex items-center justify-center shadow-md transition-all bg-rose-500 text-white animate-pulse shadow-rose-200";
+  } else {
+    input.classList.remove('bg-rose-50/30');
+    input.placeholder = "輸入文字、語音或拍照...";
+    btn.className = "w-11 h-11 rounded-2xl flex items-center justify-center shadow-md transition-all bg-slate-50 text-indigo-600 active:scale-90";
+  }
+}
+
+function toggleMic() {
+  if (!recognition) return showError("您的瀏覽器不支援語音辨識");
+  if (state.isListening) recognition.stop();
+  else recognition.start();
+}
+
+// 核心翻譯 API 呼叫
+async function executeTranslation(textOverride = null, imageBase64 = null) {
+  const text = textOverride !== null ? textOverride : document.getElementById('inputText').value.trim();
+  if (!text && !imageBase64) return;
+  
+  if (textOverride) document.getElementById('inputText').value = textOverride;
+  
+  updateLoadingUI(true);
+  document.getElementById('suggestions-box').classList.add('hidden-block');
+
+  const tonePrompt = {
+    standard: "語氣自然流暢。",
+    formal: "使用正式、禮貌、商務的敬語語氣。",
+    casual: "使用非常輕鬆、日常、朋友間對話的口語。",
+    cute: "使用活潑、可愛、生動的語氣。"
+  }[state.tone];
+
+  const payload = {
+    contents: [{
+      parts: [
+        { text: `辨識並翻譯至繁體中文(zh)、英文(en)、韓文(ko)、日文(ja)。英文需附美式音標(en_ipa)。並在 'analysis' 提供簡短解析。${tonePrompt} 回傳 JSON。` },
+        imageBase64 ? { inlineData: { mimeType: "image/jpeg", data: imageBase64 } } : { text: text }
+      ]
+    }],
+    generationConfig: { 
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: "OBJECT",
+        properties: {
+          zh: { type: "STRING" }, en: { type: "STRING" }, en_ipa: { type: "STRING" },
+          ko: { type: "STRING" }, ja: { type: "STRING" }, analysis: { type: "STRING" }
+        }
+      }
+    }
+  };
+
+  try {
+    const res = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const data = await res.json();
+    const result = JSON.parse(data.candidates[0].content.parts[0].text);
+    state.translations = result;
+    
+    // 更新結果 UI
+    document.getElementById('results-container').classList.remove('hidden-block');
+    ['zh', 'en', 'ko', 'ja'].forEach(lang => {
+      document.getElementById(`res-${lang}`).innerText = result[lang];
+    });
+    document.getElementById('res-en_ipa').innerText = result.en_ipa;
+    
+    // 更新分析 UI
+    if (result.analysis) {
+      document.getElementById('analysis-box').classList.remove('hidden-block');
+      document.getElementById('analysis-text').innerText = result.analysis;
+    }
+
+    document.getElementById('suggestions-box').classList.remove('hidden-block');
+    document.getElementById('suggestions-list').innerHTML = ''; // 清空先前的建議
+
+    // 儲存歷史
+    const newHistory = {
+      id: Date.now(),
+      input: text || "影像翻譯",
+      output: result.zh,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+    state.history = [newHistory, ...state.history].slice(0, 20);
+    localStorage.setItem('gemini_history', JSON.stringify(state.history));
+    
+    if (document.getElementById('camera-overlay').classList.contains('hidden-block') === false) {
+      closeCamera();
+    }
+  } catch (err) {
+    showError("翻譯失敗，請檢查網路連線");
+  } finally {
+    updateLoadingUI(false);
+  }
+}
+
+// 產生延伸建議 API
+async function generateSuggestions() {
+  if (!state.translations || !state.translations.zh) return;
+  const btn = document.getElementById('btn-generate-suggestions');
+  btn.innerText = "思考中...";
+  btn.disabled = true;
+
+  const payload = {
+    contents: [{ parts: [{ text: `根據對話內容：「${state.translations.zh}」，推測 3 句「繁體中文」簡短回覆。JSON 陣列回傳：["句子1", "句子2", "句子3"]。` }] }],
+    generationConfig: { responseMimeType: "application/json", responseSchema: { type: "ARRAY", items: { type: "STRING" } } }
+  };
+
+  try {
+    const res = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const data = await res.json();
+    const result = JSON.parse(data.candidates[0].content.parts[0].text);
+    
+    const list = document.getElementById('suggestions-list');
+    list.innerHTML = '';
+    result.forEach(s => {
+      const btn = document.createElement('button');
+      btn.className = "text-left px-4 py-3 bg-white border border-indigo-100 rounded-2xl text-sm font-bold text-slate-700 shadow-sm hover:text-indigo-600 active:scale-[0.98] transition-all flex items-center justify-between";
+      btn.innerHTML = `<span class="truncate pr-4">${s}</span><i data-lucide="message-circle" class="text-indigo-300 w-4 h-4"></i>`;
+      btn.onclick = () => executeTranslation(s);
+      list.appendChild(btn);
+    });
+    lucide.createIcons();
+  } catch (err) {
+    showError("無法產生建議");
+  } finally {
+    btn.innerText = "產生建議";
+    btn.disabled = false;
+  }
+}
+
+// 語音播放 API
+async function handleSpeak(lang) {
+  if (!state.translations || playingAudio) return;
+  
+  const text = state.translations[lang];
+  if (!text) return;
+
+  const btn = document.getElementById(`btn-play-${lang}`);
+  const originalIcon = btn.innerHTML;
+  btn.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-white"></i>`;
+  btn.className = "p-3.5 rounded-2xl transition-all shadow-sm bg-indigo-600 text-white animate-pulse";
+  lucide.createIcons();
+
+  const voices = { zh: "Kore", en: "Zephyr", ko: "Kore", ja: "Kore" };
+  try {
+    const res = await fetch(TTS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: `Say in ${lang}: ${text}` }] }],
+        generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voices[lang] } } } }
+      })
+    });
+    const data = await res.json();
+    const pcm = data.candidates[0].content.parts[0].inlineData.data;
+    playingAudio = new Audio(URL.createObjectURL(pcmToWav(pcm)));
+    playingAudio.onended = () => {
+      playingAudio = null;
+      resetPlayBtn(btn, originalIcon);
+    };
+    playingAudio.play();
+  } catch {
+    playingAudio = null;
+    resetPlayBtn(btn, originalIcon);
+  }
+}
+
+function resetPlayBtn(btn, iconHTML) {
+  btn.innerHTML = iconHTML;
+  btn.className = "p-3.5 rounded-2xl transition-all shadow-sm bg-slate-50 text-slate-400 active:scale-90";
+}
+
+// PCM 轉 WAV
+function pcmToWav(base64) {
+  const bin = window.atob(base64); const buf = new ArrayBuffer(44 + bin.length); const view = new DataView(buf);
+  const s = (o, str) => { for (let i = 0; i < str.length; i++) view.setUint8(o + i, str.charCodeAt(i)); };
+  s(0, 'RIFF'); view.setUint32(4, 36 + bin.length, true); s(8, 'WAVE'); s(12, 'fmt ');
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, 24000, true); view.setUint32(28, 48000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  s(36, 'data'); view.setUint32(40, bin.length, true);
+  new Uint8Array(buf, 44).set(new Uint8Array(bin.length).map((_, i) => bin.charCodeAt(i)));
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+// 複製文字
+function copyText(lang) {
+  if (!state.translations) return;
+  const text = state.translations[lang];
+  const el = document.createElement('textarea'); el.value = text; document.body.appendChild(el);
+  el.select(); document.execCommand('copy'); document.body.removeChild(el);
+  
+  const btn = document.getElementById(`btn-copy-${lang}`);
+  const originalHTML = btn.innerHTML;
+  btn.innerHTML = `<i data-lucide="check" class="w-4 h-4 text-white"></i>`;
+  btn.className = "p-3.5 rounded-2xl transition-all shadow-sm bg-emerald-500 text-white active:scale-90";
+  lucide.createIcons();
+
+  setTimeout(() => {
+    btn.innerHTML = originalHTML;
+    btn.className = "p-3.5 rounded-2xl transition-all shadow-sm bg-slate-50 text-slate-400 active:scale-90";
+  }, 1500);
+}
+
+// 歷史記錄渲染
+function renderHistory() {
+  const list = document.getElementById('history-list');
+  if (state.history.length === 0) {
+    list.innerHTML = `<div class="py-20 text-center opacity-30"><i data-lucide="languages" class="mx-auto mb-3 w-10 h-10"></i><p class="font-bold text-sm">無歷史記錄</p></div>`;
+  } else {
+    list.innerHTML = state.history.map(item => `
+      <div class="bg-white p-5 rounded-[2rem] border border-slate-100 shadow-sm flex flex-col gap-2 active:scale-[0.98] transition-all allow-select">
+        <p class="text-[10px] font-black text-slate-300">${item.timestamp}</p>
+        <p class="text-[15px] font-bold text-slate-800 line-clamp-2">${item.input}</p>
+        <div class="h-px w-full bg-slate-50 my-1"></div>
+        <p class="text-[13px] text-indigo-600 font-bold line-clamp-3">${item.output}</p>
+      </div>
+    `).join('');
+  }
+  lucide.createIcons();
+}
+
+function clearHistory() {
+  state.history = [];
+  localStorage.removeItem('gemini_history');
+  renderHistory();
+}
+
+// 原生相機上傳處理
+document.getElementById('cameraInput').addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => executeTranslation(null, reader.result.split(',')[1]);
+  reader.readAsDataURL(file);
+  e.target.value = '';
+});
+
+// 網頁版相機預覽控制
+async function openCamera() {
+  document.getElementById('camera-overlay').classList.remove('hidden-block');
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } } });
+    document.getElementById('videoElement').srcObject = stream;
+  } catch (err) {
+    showError("無法開啟相機，請允許權限或改用系統相機");
+  }
+}
+
+function closeCamera() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  document.getElementById('camera-overlay').classList.add('hidden-block');
+}
+
+function capturePhoto() {
+  const video = document.getElementById('videoElement');
+  const canvas = document.getElementById('canvasElement');
+  if (!video.videoWidth) return;
+  canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+  canvas.getContext('2d').drawImage(video, 0, 0);
+  executeTranslation(null, canvas.toDataURL('image/jpeg', 0.8).split(',')[1]);
+}
